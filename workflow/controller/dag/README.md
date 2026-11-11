@@ -15,6 +15,7 @@ Both template types use it — Steps tasks are adapted to the same `Task` interf
 | `task.go` | `Task` interface and the `DAGTask` adapter for `wfv1.DAGTask` (`StepAdapter` lives in `workflow/controller/steps.go`) |
 | `types.go` | `EvaluationResult`, `Action`, and the `taskResult` scope struct |
 | `expansion.go` | `withItems` / `withParam` / `withSequence` expansion and expanded task naming |
+| `explain.go` | `ExplainBlockedTask` — read-only explanation of a blocked task's depends condition and the minimal open-outcome sets that would unlock it |
 | `helpers_test.go` | Test-only convenience (`NewDAGEvaluator`); production code does not use it |
 
 ## How it works
@@ -70,6 +71,7 @@ evaluator.FindLeafTaskNames(ctx)         // tasks nothing depends on
 evaluator.GetAncestors(ctx, taskName)    // transitive dependencies (unordered)
 evaluator.GetDependencies(ctx, taskName) // direct dependencies
 evaluator.GetTask(name)                  // the Task by name
+evaluator.ExplainBlockedTask(ctx, name, budget) // read-only depends explanation + minimal unlocking outcome sets
 task.Expand / task.ShouldExpand          // withItems/withParam/withSequence expansion
 dag.TaskNodeName                         // task → node name convention
 dag.TaskNodeID / dag.TaskNode            // a task's node ID and node
@@ -86,6 +88,18 @@ Fields of `EvaluationResult` the engine acts on:
 
 `Action`, `ActionReason`, `Suspended` and `WaitingOn` are diagnostic: the engine logs them at debug level and does not act on them.
 
+### 7. Blocked-task explanation (`ExplainBlockedTask`, `explain.go`)
+
+`ExplainBlockedTask` is a read-only diagnostic over the same nodes and depends logic: it never mutates the workflow, retries a task, or promises scheduling. For a task without a node it reports:
+
+- the current judgment (`Ready` / `Waiting` / `Omitted` / `Fulfilled`, from `Evaluate`);
+- dependencies split into **terminal** (a fulfilled node whose outcome cannot change) and **pending** (still open);
+- the antichain of **minimal constraint sets** over pending outcomes whose every completion makes the depends expression true.
+
+Each open task is one finite-domain variable over the mutually-exclusive outcomes `Succeeded`, `Failed`, `Errored`, `Skipped`, `Omitted`, `Daemoned` — the one-hot vocabulary of `taskResult` — so an answer can never assign two independent booleans to one task. An open TaskGroup expands into one variable per unfinished item, and its `AnySucceeded`/`AllFailed` and completed phase are derived from member states exactly like `taskResultForNode`; members missing from the node map (pruned, offloaded, or not yet expanded) become an explicit unseen-members variable listed in `UnknownMembers`, never an assumed empty set. Legacy `dependencies`, `continueOn` and user `depends` all flow through the same `ParseDepends`-based topology, so negation and OR produce real minimal sets instead of the full ancestor list.
+
+A bounded Cartesian enumeration (the BDD/SAT equivalent for these small finite domains) builds the truth table with the real `evalBool`; candidates are then extracted by increasing size, pruned against accepted minimal sets, and every emitted solution is re-evaluated over all completions and proven minimal — removing any one constraint leaves a completion where the expression is false. Hitting `ExplainBudget` sets `Incomplete` with the proven subset found so far; an exhaustive empty satisfying set sets `Unsatisfiable`.
+
 ## Architecture
 
 ```text
@@ -96,9 +110,12 @@ Engine (workflow/controller/engine.go)
   │     │     ├── common.ParseDepends / ExpandDependency (shared with validation)
   │     │     ├── hex-encoded identifiers
   │     │     └── PullOrder (walk order)
-  │     └── workflowStore (store.go)
-  │           ├── node lookup by task name (TaskNodeName)
-  │           └── hook-fulfilment checks
+  │     ├── workflowStore (store.go)
+  │     │     ├── node lookup by task name (TaskNodeName)
+  │     │     └── hook-fulfilment checks
+  │     └── ExplainBlockedTask (explain.go)
+  │           ├── finite-domain outcome model + task-group member derivation
+  │           └── bounded enumeration, minimal antichain, real-evaluator proofs
   │
   └── Task interface (task.go)
         ├── DAGTask   (DAG templates)

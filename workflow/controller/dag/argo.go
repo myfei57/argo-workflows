@@ -104,31 +104,17 @@ func (e *DAGEvaluator) evaluateDependsReadiness(ctx context.Context, taskName st
 			return waiting, nil
 		}
 
-		anySucceeded := false
-		allFailed := false
-
+		// Only the expanded items count: a lifecycle hook hanging off the
+		// group is not an item and must not make it AnySucceeded.
+		var children []*wfv1.NodeStatus
+		var missingChildren bool
 		if depNode.Type == wfv1.NodeTypeTaskGroup {
-			// Only the expanded items count: a lifecycle hook hanging off the
-			// group is not an item and must not make it AnySucceeded.
-			children, missingChildren := e.store.taskGroupChildren(depName)
-			allFailed = len(children) > 0 && !missingChildren
-
-			for _, child := range children {
-				anySucceeded = anySucceeded || child.Phase == wfv1.NodeSucceeded
-				allFailed = allFailed && child.Phase == wfv1.NodeFailed
-			}
+			children, missingChildren = e.store.taskGroupChildren(depName)
 		}
 
-		evalScope[normalizeTaskName(depName)] = taskResult{
-			Succeeded:    depNode.Phase == wfv1.NodeSucceeded,
-			Failed:       depNode.Phase == wfv1.NodeFailed,
-			Errored:      depNode.Phase == wfv1.NodeError,
-			Skipped:      depNode.Phase == wfv1.NodeSkipped,
-			Omitted:      depNode.Phase == wfv1.NodeOmitted,
-			Daemoned:     depNode.IsDaemoned() && depNode.Phase != wfv1.NodePending,
-			AnySucceeded: anySucceeded,
-			AllFailed:    allFailed,
-		}
+		// taskResultForNode is the single scope-construction rule: blocked-task
+		// explanations (explain.go) build hypothetical scopes with the same logic.
+		evalScope[normalizeTaskName(depName)] = taskResultForNode(depNode, children, missingChildren)
 	}
 
 	logic := e.tasks.GetDependsLogic(ctx, taskName)
@@ -306,6 +292,37 @@ func (e *DAGEvaluator) evaluateTaskGroupNode(taskName string, node *wfv1.NodeSta
 		result.ActionReason = "task group items in progress"
 	}
 	return result
+}
+
+// taskResultForNode builds the evaluator scope vector for one dependency
+// node, the single rule evaluateDependsReadiness uses: phase-derived
+// booleans for every node, plus a TaskGroup's AnySucceeded/AllFailed from
+// its item nodes. Hypothetical scopes in ExplainBlockedTask derive from the
+// same rule so an explanation can never diverge from a real evaluation.
+func taskResultForNode(node *wfv1.NodeStatus, children []*wfv1.NodeStatus, missingChildren bool) taskResult {
+	anySucceeded := false
+	allFailed := false
+
+	if node.Type == wfv1.NodeTypeTaskGroup {
+		// Only the expanded items count: a lifecycle hook hanging off the
+		// group is not an item and must not make it AnySucceeded.
+		allFailed = len(children) > 0 && !missingChildren
+		for _, child := range children {
+			anySucceeded = anySucceeded || child.Phase == wfv1.NodeSucceeded
+			allFailed = allFailed && child.Phase == wfv1.NodeFailed
+		}
+	}
+
+	return taskResult{
+		Succeeded:    node.Phase == wfv1.NodeSucceeded,
+		Failed:       node.Phase == wfv1.NodeFailed,
+		Errored:      node.Phase == wfv1.NodeError,
+		Skipped:      node.Phase == wfv1.NodeSkipped,
+		Omitted:      node.Phase == wfv1.NodeOmitted,
+		Daemoned:     node.IsDaemoned() && node.Phase != wfv1.NodePending,
+		AnySucceeded: anySucceeded,
+		AllFailed:    allFailed,
+	}
 }
 
 // TaskGroupPhase is the phase a TaskGroup takes from its item nodes: the
