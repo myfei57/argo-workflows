@@ -56,7 +56,14 @@ func NewArtifactDeleteCommand() *cobra.Command {
 				artifactGCTaskInterface := workflowInterface.ArgoprojV1alpha1().WorkflowArtifactGCTasks(namespace)
 				labelSelector := fmt.Sprintf("%s = %s", common.LabelKeyArtifactGCPodHash, podName)
 
-				err = deleteArtifacts(ctx, labelSelector, artifactGCTaskInterface)
+				if mode := os.Getenv(common.EnvVarArtifactGCMode); mode != "" {
+					// Versioned Plan/Apply flow: a read-only preview Pod (plan) or a
+					// conditional-delete Pod (apply) against the frozen Plan annotation.
+					err = runArtifactGCPlan(ctx, mode, labelSelector, artifactGCTaskInterface, resources{Files: map[string][]byte{}})
+				} else {
+					// Default legacy garbage-collection path, unchanged.
+					err = deleteArtifacts(ctx, labelSelector, artifactGCTaskInterface)
+				}
 				if err != nil {
 					wfExecutor.AddError(ctx, err)
 					return wfExecutor.HasError()

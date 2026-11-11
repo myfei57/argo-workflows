@@ -62,6 +62,15 @@ const (
 	// the strategy whose artifacts are being deleted
 	AnnotationKeyArtifactGCStrategy = workflow.WorkflowFullName + "/artifact-gc-strategy"
 
+	// AnnotationKeyArtifactGCPlan stores the serialized ArtifactGCPlan on a
+	// WorkflowArtifactGCTask. The Plan contains no credentials and survives controller
+	// or Pod restarts so an incomplete Apply can resume against the same frozen versions.
+	AnnotationKeyArtifactGCPlan = workflow.WorkflowFullName + "/artifact-gc-plan"
+
+	// AnnotationKeyArtifactGCMode marks whether an Artifact GC Pod runs the read-only
+	// preview (plan) phase or the conditional-deletion (apply) phase.
+	AnnotationKeyArtifactGCMode = workflow.WorkflowFullName + "/artifact-gc-mode"
+
 	// LabelParallelismLimit is a label applied on namespace objects to control the per namespace parallelism.
 	LabelParallelismLimit = workflow.WorkflowFullName + "/parallelism-limit"
 
@@ -148,6 +157,20 @@ const (
 
 	// EnvVarArtifactGCPodHash is applied as a Label on the WorkflowTaskSets read by the Artifact GC Pod, so that the Pod can find them
 	EnvVarArtifactGCPodHash = "ARGO_ARTIFACT_POD_NAME"
+	// EnvVarArtifactGCMode selects the versioned Artifact GC phase inside a Plan-mode
+	// GC Pod: "plan" builds the read-only preview Plan, "apply" executes the frozen
+	// Plan. The variable is controller-set and never read by users directly.
+	EnvVarArtifactGCMode = "ARGO_ARTIFACT_GC_MODE"
+	// EnvVarArtifactGCWorkflowUID carries the Workflow UID the Plan was built for, so
+	// the apply Pod can re-verify Plan identity before any conditional delete.
+	EnvVarArtifactGCWorkflowUID = "ARGO_ARTIFACT_GC_WORKFLOW_UID"
+	// EnvVarArtifactGCWorkflowRV carries the Workflow resourceVersion captured at
+	// planning time and is part of the audited Plan identity.
+	EnvVarArtifactGCWorkflowRV = "ARGO_ARTIFACT_GC_WORKFLOW_RV"
+
+	// ArtifactGCModePlan and ArtifactGCModeApply are the values of EnvVarArtifactGCMode.
+	ArtifactGCModePlan  = "plan"
+	ArtifactGCModeApply = "apply"
 	// EnvVarArtifactPluginNames is a comma-separated list of artifact plugin
 	// container names. It is set on the artifact GC pod, on the legacy `wait`
 	// container, and on the init-less `supervisor` container, which use it to

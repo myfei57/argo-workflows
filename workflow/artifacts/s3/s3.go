@@ -32,6 +32,7 @@ import (
 	"github.com/argoproj/argo-workflows/v4/util/logging"
 	executorretry "github.com/argoproj/argo-workflows/v4/util/retry"
 	waitutil "github.com/argoproj/argo-workflows/v4/util/wait"
+	"github.com/argoproj/argo-workflows/v4/workflow/artifactgc"
 	artifactscommon "github.com/argoproj/argo-workflows/v4/workflow/artifacts/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/tracing"
@@ -73,6 +74,24 @@ type Client interface {
 
 	// MakeBucket creates a bucket with name bucketName and options opts
 	MakeBucket(bucketName string, opts minio.MakeBucketOptions) error
+
+	// GetBucketVersioningEnabled reports whether S3 bucket versioning is Enabled.
+	// Suspended or unversioned buckets return false without error.
+	GetBucketVersioningEnabled(bucket string) (bool, error)
+
+	// StatObjectVersion reads one concrete object version. An empty versionID reads
+	// the current version.
+	StatObjectVersion(bucket, key, versionID string) (artifactgc.ObjectVersion, error)
+
+	// ListObjectVersions enumerates every object version (current and non-current,
+	// including delete markers) under a key prefix. The listing is finite but cannot
+	// prove exhaustiveness against concurrent writes, so callers treat a prefix
+	// snapshot as Incomplete.
+	ListObjectVersions(bucket, keyPrefix string) ([]artifactgc.ObjectVersion, error)
+
+	// RemoveObjectVersion deletes exactly one immutable object version. It must never
+	// be called with an empty versionID, which would be an unversioned bare delete.
+	RemoveObjectVersion(bucket, key, versionID string) error
 }
 
 type EncryptOpts struct {

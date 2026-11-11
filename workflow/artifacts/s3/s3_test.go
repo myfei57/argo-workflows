@@ -15,6 +15,7 @@ import (
 
 	wfv1 "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
 	"github.com/argoproj/argo-workflows/v4/util/logging"
+	"github.com/argoproj/argo-workflows/v4/workflow/artifactgc"
 )
 
 const transientEnvVarKey = "TRANSIENT_ERROR_PATTERN"
@@ -24,6 +25,12 @@ type mockClient struct {
 	files map[string][]string
 	// mockedErrs is a map where key is the function name and value is the mocked error of that function
 	mockedErrs map[string]error
+	// versioningEnabled records which buckets have S3 versioning enabled
+	versioningEnabled map[string]bool
+	// versions is a map where key is a bucket name and value is its object versions
+	versions map[string][]artifactgc.ObjectVersion
+	// removedVersions records every conditional version delete (bucket/key/versionID)
+	removedVersions []artifactgc.ObjectVersion
 }
 
 func newMockClient(files map[string][]string, mockedErrs map[string]error) Client {
@@ -246,6 +253,55 @@ func TestOpenStreamS3Artifact(t *testing.T) {
 // Delete deletes an S3 artifact by artifact key
 func (s *mockClient) Delete(bucket, key string) error {
 	return s.getMockedErr("Delete")
+}
+
+func (s *mockClient) GetBucketVersioningEnabled(bucket string) (bool, error) {
+	if err := s.getMockedErr("GetBucketVersioningEnabled"); err != nil {
+		return false, err
+	}
+	return s.versioningEnabled[bucket], nil
+}
+
+func (s *mockClient) StatObjectVersion(bucket, key, versionID string) (artifactgc.ObjectVersion, error) {
+	if err := s.getMockedErr("StatObjectVersion"); err != nil {
+		return artifactgc.ObjectVersion{}, err
+	}
+	for _, v := range s.versions[bucket] {
+		if v.Key == key && (versionID == "" || v.VersionID == versionID) {
+			return v, nil
+		}
+	}
+	return artifactgc.ObjectVersion{}, minio.ErrorResponse{Code: "NoSuchKey", Message: "no such object version"}
+}
+
+func (s *mockClient) ListObjectVersions(bucket, keyPrefix string) ([]artifactgc.ObjectVersion, error) {
+	if err := s.getMockedErr("ListObjectVersions"); err != nil {
+		return nil, err
+	}
+	out := make([]artifactgc.ObjectVersion, 0)
+	for _, v := range s.versions[bucket] {
+		if strings.HasPrefix(v.Key, keyPrefix) {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+func (s *mockClient) RemoveObjectVersion(bucket, key, versionID string) error {
+	if err := s.getMockedErr("RemoveObjectVersion"); err != nil {
+		return err
+	}
+	if versionID == "" {
+		return minio.ErrorResponse{Code: "InvalidArgument", Message: "versionID is required"}
+	}
+	for i, v := range s.versions[bucket] {
+		if v.Key == key && v.VersionID == versionID {
+			s.removedVersions = append(s.removedVersions, v)
+			s.versions[bucket] = append(s.versions[bucket][:i], s.versions[bucket][i+1:]...)
+			return nil
+		}
+	}
+	return minio.ErrorResponse{Code: "NoSuchVersion", Message: "no such object version"}
 }
 
 func TestLoadS3Artifact(t *testing.T) {

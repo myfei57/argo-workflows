@@ -18,6 +18,7 @@ import (
 	"github.com/argoproj/argo-workflows/v4/pkg/apis/workflow"
 	wfv1 "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
 	"github.com/argoproj/argo-workflows/v4/util/logging"
+	"github.com/argoproj/argo-workflows/v4/workflow/artifactgc"
 	"github.com/argoproj/argo-workflows/v4/workflow/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/controller/indexes"
 	"github.com/argoproj/argo-workflows/v4/workflow/util"
@@ -143,6 +144,13 @@ func (woc *wfOperationCtx) processArtifactGCStrategy(ctx context.Context, strate
 		return nil
 	}
 
+	// Versioned Plan/Apply flow, feature-flagged off by default. It is only eligible
+	// when every artifact in this strategy run is S3; any mix falls back to the legacy
+	// path unchanged.
+	if artifactgc.PlanEnabled() && planModeEligible(artifactSearchResults) {
+		return woc.processArtifactGCStrategyPlan(ctx, strategy, artifactSearchResults)
+	}
+
 	// cache the templates by name so we can find them easily
 	templatesByName := make(map[string]*wfv1.Template)
 
@@ -222,7 +230,7 @@ func (woc *wfOperationCtx) processArtifactGCStrategy(ctx context.Context, strate
 				return fmt.Errorf("can't find podInfo for podName %q", podName)
 			}
 
-			_, err := woc.createArtifactGCPod(ctx, strategy, tasks, podAccessInfo, podName, templatesToArtList, templatesByName)
+			_, err := woc.createArtifactGCPod(ctx, strategy, tasks, podAccessInfo, podName, templatesToArtList, templatesByName, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -313,6 +321,18 @@ type podInfo struct {
 	serviceAccount string
 	podMetadata    wfv1.Metadata
 	podSpecPatch   string
+}
+
+// artifactGCAnnotations builds the Pod annotations for an Artifact GC Pod, adding the
+// versioned Plan-mode phase annotation when extraAnnotations is supplied.
+func artifactGCAnnotations(strategy wfv1.ArtifactGCStrategy, extra map[string]string) map[string]string {
+	annotations := map[string]string{
+		common.AnnotationKeyArtifactGCStrategy: string(strategy),
+	}
+	for k, v := range extra {
+		annotations[k] = v
+	}
+	return annotations
 }
 
 // get Pod name
@@ -460,9 +480,12 @@ func (woc *wfOperationCtx) createWorkflowArtifactGCTask(ctx context.Context, tas
 	return created, nil
 }
 
-// create the Pod which will do the deletions
+// create the Pod which will do the deletions. extraEnv and extraAnnotations carry the
+// versioned Plan/Apply phase settings (mode, Workflow identity); the legacy path
+// passes nil/empty and keeps its original behavior.
 func (woc *wfOperationCtx) createArtifactGCPod(ctx context.Context, strategy wfv1.ArtifactGCStrategy, tasks []*wfv1.WorkflowArtifactGCTask,
-	info podInfo, podName string, templatesToArtList templatesToArtifacts, templatesByName map[string]*wfv1.Template) (*corev1.Pod, error) {
+	info podInfo, podName string, templatesToArtList templatesToArtifacts, templatesByName map[string]*wfv1.Template,
+	extraEnv []corev1.EnvVar, extraAnnotations map[string]string) (*corev1.Pod, error) {
 	woc.log.WithFields(logging.Fields{"strategy": strategy, "podName": podName}).Info(ctx, "creating pod to delete artifacts")
 
 	// Pod is owned by WorkflowArtifactGCTasks, so it will die automatically when all of them have died
@@ -548,9 +571,7 @@ func (woc *wfOperationCtx) createArtifactGCPod(ctx context.Context, strategy wfv
 				common.LabelKeyComponent: artifactGCComponent,
 				common.LabelKeyCompleted: "false",
 			},
-			Annotations: map[string]string{
-				common.AnnotationKeyArtifactGCStrategy: string(strategy),
-			},
+			Annotations: artifactGCAnnotations(strategy, extraAnnotations),
 
 			OwnerReferences: ownerReferences,
 		},
@@ -564,7 +585,9 @@ func (woc *wfOperationCtx) createArtifactGCPod(ctx context.Context, strategy wfv
 				Image:           woc.controller.executorImage(),
 				ImagePullPolicy: woc.controller.executorImagePullPolicy(),
 				Args:            append([]string{"artifact", "delete"}, woc.getExecutorLogOpts(ctx)...),
-				Env: []corev1.EnvVar{
+				// Versioned Plan/Apply phase settings (extraEnv) are appended on the
+				// plan-mode path; the legacy path passes an empty slice.
+				Env: append([]corev1.EnvVar{
 					{
 						Name: common.EnvVarPodName,
 						ValueFrom: &corev1.EnvVarSource{
@@ -578,7 +601,7 @@ func (woc *wfOperationCtx) createArtifactGCPod(ctx context.Context, strategy wfv
 					{Name: common.EnvVarDeadline, Value: time.Now().Format(time.RFC3339)},
 					{Name: common.EnvVarArtifactGCPodHash, Value: woc.artifactGCPodLabel(podName)},
 					{Name: common.EnvVarArtifactPluginNames, Value: common.JoinPluginNames(artifactPluginSidecarNames)},
-				},
+				}, extraEnv...),
 				// if this pod is breached by an attacker we:
 				// * prevent installation of any new packages
 				// * modification of the file-system
@@ -645,6 +668,12 @@ func (woc *wfOperationCtx) processArtifactGCCompletion(ctx context.Context) erro
 			continue
 		}
 
+		// Plan-mode Pods are reconciled by the two-phase Plan state machine, which
+		// advances processed/finalizer state only after the frozen Plan fully succeeds.
+		if _, isPlanPod := pod.Annotations[common.AnnotationKeyArtifactGCMode]; isPlanPod {
+			continue
+		}
+
 		// make sure we didn't already process this one
 		if woc.wf.Status.ArtifactGCStatus.IsArtifactGCPodRecouped(pod.Name) {
 			// already processed
@@ -682,6 +711,11 @@ func (woc *wfOperationCtx) processArtifactGCCompletion(ctx context.Context) erro
 	} else {
 		// check if all artifacts have been deleted and if so remove Finalizer
 		removeFinalizer = woc.allArtifactsDeleted()
+	}
+	// A Plan-mode workflow keeps its finalizer while preview/apply Pods are in flight,
+	// even if its frozen objects have already been conditionally deleted.
+	if removeFinalizer && woc.planModeWorkInProgress(ctx) {
+		removeFinalizer = false
 	}
 	if removeFinalizer {
 		woc.log.WithField("forceFinalizerRemoval", forceFinalizerRemoval).Info(ctx, "no remaining artifacts to GC, removing artifact GC finalizer")

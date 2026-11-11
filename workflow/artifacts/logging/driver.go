@@ -19,6 +19,17 @@ func New(d common.ArtifactDriver) common.ArtifactDriver {
 	return &driver{d}
 }
 
+// Unwrap returns the underlying artifact driver behind the logging interceptor so
+// callers can probe optional capabilities (for example versioned conditional
+// deletion) that the interceptor does not itself re-declare. A non-wrapped driver is
+// returned unchanged.
+func Unwrap(d common.ArtifactDriver) common.ArtifactDriver {
+	if logged, ok := d.(*driver); ok {
+		return logged.ArtifactDriver
+	}
+	return d
+}
+
 func (d *driver) Load(ctx context.Context, inputArtifact *wfv1.Artifact, path string) error {
 	log := logging.RequireLoggerFromContext(ctx)
 	log.Info(ctx, "Loading artifact")
