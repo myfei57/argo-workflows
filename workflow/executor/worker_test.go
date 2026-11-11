@@ -55,9 +55,9 @@ func TestWorkerSupports(t *testing.T) {
 func TestPlanFor_WorkerLayout(t *testing.T) {
 	for _, tmpl := range []*wfv1.Template{{Container: &apiv1.Container{}}, {Script: &wfv1.ScriptTemplate{}}} {
 		plan := planFor(tmpl, LayoutWorker, nil)
-		assert.Equal(t, []string{"check-worker", "create-task-dirs", "stage-files", "load-artifacts"}, stageNames(plan.Prepare))
+		assert.Equal(t, []string{"check-worker", "create-task-dirs", "stage-files", "load-artifacts", "finalize-input-provenance"}, stageNames(plan.Prepare))
 		assert.Equal(t, []string{"initialize-output", "run-main"}, stageNames(plan.Run))
-		assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "save-logs", "report-outputs"}, stageNames(plan.Collect))
+		assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "finalize-output-provenance", "save-logs", "report-outputs"}, stageNames(plan.Collect))
 	}
 }
 

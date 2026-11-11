@@ -127,6 +127,14 @@ func (s *mockClient) MakeBucket(bucketName string, opts minio.MakeBucketOptions)
 	return s.getMockedErr("MakeBucket")
 }
 
+// StatObject returns mocked object metadata for provenance lookups.
+func (s *mockClient) StatObject(bucket, key string) (minio.ObjectInfo, error) {
+	if err := s.getMockedErr("StatObject"); err != nil {
+		return minio.ObjectInfo{}, err
+	}
+	return minio.ObjectInfo{Key: key, ETag: "mock-etag", VersionID: "mock-version", Size: 42}, nil
+}
+
 func TestOpenStreamS3Artifact(t *testing.T) {
 	ctx := logging.TestContext(t.Context())
 

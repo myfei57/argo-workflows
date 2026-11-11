@@ -40,3 +40,26 @@ type ArtifactDriver interface {
 // ErrDeleteNotSupported Sentinel error definition for artifact deletion
 var ErrDeleteNotSupported = errors.New("delete not supported for this artifact storage, please check" +
 	" the following issue for details: https://github.com/argoproj/argo-workflows/issues/3102")
+
+// ObjectInfo is the backend-observed metadata for one stored object. It
+// carries version and ETag facts only: an ETag is an opaque backend
+// value and must never be presented as a content SHA.
+type ObjectInfo struct {
+	// VersionID is the backend object version when object versioning is
+	// enabled and exposed; empty means unavailable.
+	VersionID string
+	// ETag is the backend ETag verbatim, including any multipart-upload
+	// composite shape.
+	ETag string
+	// Size is the backend-reported object size in bytes; -1 when
+	// unreported.
+	Size int64
+}
+
+// ObjectInfoDriver is the optional interface drivers implement when the
+// storage backend can expose object version metadata without another
+// upload or download. Provenance callers must treat a missing
+// implementation or a failed lookup as Unknown rather than an error.
+type ObjectInfoDriver interface {
+	ObjectInfo(ctx context.Context, artifact *v1alpha1.Artifact) (*ObjectInfo, error)
+}

@@ -73,6 +73,10 @@ type Client interface {
 
 	// MakeBucket creates a bucket with name bucketName and options opts
 	MakeBucket(bucketName string, opts minio.MakeBucketOptions) error
+
+	// StatObject returns the backend object metadata (ETag, version ID,
+	// size) without downloading the object.
+	StatObject(bucket, key string) (minio.ObjectInfo, error)
 }
 
 type EncryptOpts struct {
@@ -288,6 +292,26 @@ func (s3Driver *ArtifactDriver) SaveStream(ctx context.Context, reader io.Reader
 	return artifactscommon.SaveStreamViaTempFile(reader, "s3-upload-*", func(path string) error {
 		return s3Driver.Save(ctx, path, outputArtifact)
 	})
+}
+
+// ObjectInfo implements artifactscommon.ObjectInfoDriver. It performs a
+// metadata-only StatObject: no object bytes are transferred. The ETag is
+// returned verbatim so callers can distinguish a multipart composite
+// ETag from a content SHA themselves.
+func (s3Driver *ArtifactDriver) ObjectInfo(ctx context.Context, artifact *wfv1.Artifact) (*artifactscommon.ObjectInfo, error) {
+	s3cli, err := s3Driver.newClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new S3 client: %w", err)
+	}
+	info, err := s3cli.StatObject(artifact.S3.Bucket, artifact.S3.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat %s/%s: %w", artifact.S3.Bucket, artifact.S3.Key, err)
+	}
+	return &artifactscommon.ObjectInfo{
+		VersionID: info.VersionID,
+		ETag:      info.ETag,
+		Size:      info.Size,
+	}, nil
 }
 
 // Delete deletes an artifact from an S3 compliant storage
@@ -784,6 +808,19 @@ func (s *s3client) KeyExists(bucket, key string) (bool, error) {
 	}
 
 	return false, err
+}
+
+// StatObject fetches object metadata without transferring the object.
+// The returned ETag is the backend's opaque value and must not be
+// treated as a content digest by callers.
+func (s *s3client) StatObject(bucket, key string) (minio.ObjectInfo, error) {
+	logging.RequireLoggerFromContext(s.ctx).WithFields(logging.Fields{"endpoint": s.Endpoint, "bucket": bucket, "key": key}).Info(s.ctx, "Stat object from s3")
+
+	encOpts, err := s.EncryptOpts.buildServerSideEnc(bucket, key)
+	if err != nil {
+		return minio.ObjectInfo{}, err
+	}
+	return s.minioClient.StatObject(s.ctx, bucket, key, minio.StatObjectOptions{ServerSideEncryption: encOpts})
 }
 
 func (s *s3client) Delete(bucket, key string) error {

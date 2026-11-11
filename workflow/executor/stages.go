@@ -45,6 +45,13 @@ var (
 	loadArtifacts = Stage{Name: "load-artifacts", Run: func(ctx context.Context, we *WorkflowExecutor) error {
 		return we.LoadArtifactsWithoutPlugins(ctx)
 	}}
+	// finalizeInputProvenance closes the input provenance manifest once
+	// every (possibly parallel) load stage has recorded its receipts. It
+	// is a no-op while provenance is disabled.
+	finalizeInputProvenance = Stage{Name: "finalize-input-provenance", Run: func(ctx context.Context, we *WorkflowExecutor) error {
+		we.finalizeInputProvenance(ctx)
+		return nil
+	}}
 )
 
 // loadArtifactsFromPlugin loads the input artifacts served by one artifact
@@ -86,6 +93,14 @@ var (
 		artifacts, err := we.SaveArtifacts(ctx)
 		we.savedArtifacts = artifacts
 		return err
+	}}
+	// finalizeOutputProvenance closes the output provenance manifest only
+	// after save-artifacts succeeded for the whole output set. A failed
+	// save skips the stage's effect because SaveArtifacts returns an
+	// error, leaving the manifest without a completion footer.
+	finalizeOutputProvenance = Stage{Name: "finalize-output-provenance", NeedsMainOutputs: true, Run: func(ctx context.Context, we *WorkflowExecutor) error {
+		we.finalizeOutputProvenance(ctx)
+		return nil
 	}}
 	saveLogs = Stage{Name: "save-logs", Run: func(ctx context.Context, we *WorkflowExecutor) error {
 		we.savedArtifacts = append(we.savedArtifacts, we.SaveLogs(ctx)...)

@@ -570,6 +570,7 @@ func (pb *podBuilder) build(ctx context.Context) (*podBuildResult, error) {
 	// Add standard environment variables, making pod spec larger
 	envVars := []apiv1.EnvVar{
 		{Name: common.EnvVarNodeID, Value: nodeID},
+		{Name: common.EnvVarNodeAttempt, Value: strconv.Itoa(util.NodeAttemptFromName(nodeName))},
 		{Name: common.EnvVarIncludeScriptOutput, Value: strconv.FormatBool(opts.includeScriptOutput)},
 		{Name: common.EnvVarDeadline, Value: deadline.Format(time.RFC3339)},
 		{Name: common.EnvVarWorkflowName, Value: pb.in.wfName},

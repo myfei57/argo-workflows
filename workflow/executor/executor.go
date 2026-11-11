@@ -46,6 +46,7 @@ import (
 	artifactcommon "github.com/argoproj/argo-workflows/v4/workflow/artifacts/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/executor/maindriver"
+	"github.com/argoproj/argo-workflows/v4/workflow/executor/provenance"
 	"github.com/argoproj/argo-workflows/v4/workflow/executor/tracing"
 )
 
@@ -91,6 +92,15 @@ type Process struct {
 	// newRuntime builds the container runtime for a task from its paths.
 	newRuntime func(paths TaskPaths) ContainerRuntimeExecutor
 
+	// newDriver builds an artifact driver. It defaults to
+	// artifacts.NewDriver and is overridable as a test seam so executor
+	// tests can observe real Load/Save call counts without a backend.
+	newDriver artifacts.NewDriverFunc
+
+	// provenanceCfg is the optional artifact provenance configuration;
+	// nil or Enabled=false leaves every artifact path unchanged.
+	provenanceCfg *provenance.Config
+
 	// memoizedConfigMaps caches configmap lookups (used by some artifact
 	// drivers, e.g. HDFS for Kerberos config). memoizedMu guards it because
 	// init-less supervisor loads input artifacts concurrently across plugins
@@ -130,6 +140,8 @@ type WorkflowExecutor struct {
 	workflow    string
 	workflowUID types.UID
 	nodeID      string
+	// nodeAttempt is the zero-based retry attempt of this task's node.
+	nodeAttempt int
 	paths       TaskPaths
 	layout      Layout
 	// RuntimeExecutor reads and signals this task's containers.
@@ -165,6 +177,13 @@ type WorkflowExecutor struct {
 
 	// sink is where the task's result goes.
 	sink ResultSink
+
+	// Provenance recorders for the two boundaries; lazily created and nil
+	// unless the feature is enabled. provenanceMu guards their creation
+	// because init-less plugin load stages record concurrently.
+	provenanceMu     sync.Mutex
+	inputProvenance  *provenance.Recorder
+	outputProvenance *provenance.Recorder
 }
 
 // ProcessConfig carries the process-wide values a Process is constructed
@@ -207,6 +226,10 @@ type ProcessConfig struct {
 	// MainDriver runs main in-process for the worker layout. Nil in a pod,
 	// where main runs in its own container.
 	MainDriver maindriver.MainDriver
+	// Provenance optionally enables artifact provenance manifests at
+	// the load/save success boundaries. Nil disables the feature and
+	// adds no overhead to the artifact path.
+	Provenance *provenance.Config
 }
 
 // TaskConfig carries the per-task values a WorkflowExecutor is constructed
@@ -214,9 +237,12 @@ type ProcessConfig struct {
 // them from the pod's environment exactly like ProcessConfig; a long-lived
 // worker would instead receive a fresh TaskConfig for each task it runs.
 type TaskConfig struct {
-	WorkflowName        string
-	WorkflowUID         types.UID
-	NodeID              string
+	WorkflowName string
+	WorkflowUID  types.UID
+	NodeID       string
+	// NodeAttempt is the zero-based retry attempt of the node, injected
+	// by the controller (ARGO_NODE_ATTEMPT). Zero is the first attempt.
+	NodeAttempt         int
 	Template            wfv1.Template
 	IncludeScriptOutput bool
 	Deadline            time.Time
@@ -300,6 +326,8 @@ func NewProcess(
 		RESTClient:                   restClient,
 		Namespace:                    cfg.Namespace,
 		newRuntime:                   newRuntime,
+		newDriver:                    artifacts.NewDriver,
+		provenanceCfg:                cfg.Provenance,
 		Tracing:                      tracing,
 		memoizedConfigMaps:           map[string]string{},
 		annotationPatchTickDuration:  cfg.AnnotationPatchTickDuration,
@@ -332,6 +360,7 @@ func (p *Process) NewExecutor(task Task, layout Layout, sink ResultSink) *Workfl
 		workflow:                 cfg.WorkflowName,
 		workflowUID:              cfg.WorkflowUID,
 		nodeID:                   cfg.NodeID,
+		nodeAttempt:              cfg.NodeAttempt,
 		Template:                 cfg.Template,
 		IncludeScriptOutput:      cfg.IncludeScriptOutput,
 		Deadline:                 cfg.Deadline,
@@ -395,6 +424,10 @@ func (we *WorkflowExecutor) loadArtifacts(ctx context.Context, pluginName wfv1.A
 			return err
 		}
 	}
+	// The input manifest is finalized by the finalize-input-provenance
+	// stage after every parallel load stage has completed; finalizing
+	// here could freeze it while a sibling plugin stage is still
+	// recording.
 	return nil
 }
 
@@ -471,7 +504,28 @@ func (we *WorkflowExecutor) loadArtifact(ctx context.Context, pluginName wfv1.Ar
 		return fmt.Errorf("artifact %s failed to load: %w", art.Name, err)
 	}
 
-	err = we.unarchiveArtifact(ctx, art, tempArtPath, artPath)
+	// Detect the archive representation once; unarchive and provenance
+	// both consume the result.
+	archiveFormat, err := we.detectInputArchiveFormat(ctx, art, tempArtPath)
+	if err != nil {
+		return err
+	}
+
+	// Provenance: hash the exact downloaded transport bytes before
+	// unarchive removes the temp file. The digest comes from one local
+	// read; the driver is never called a second time. A failure leaves
+	// transportDigest unknown and suppresses the success receipt.
+	var transportDigest provenance.Digest
+	if we.provenanceEnabled() {
+		digest, digestErr := provenance.DigestFile(tempArtPath, we.provenanceBudget())
+		if digestErr != nil {
+			logger.WithField("name", art.Name).WithError(digestErr).Error(ctx, "failed to digest downloaded artifact bytes; no provenance receipt will be written")
+		} else {
+			transportDigest = digest
+		}
+	}
+
+	err = we.unarchiveArtifact(ctx, art, tempArtPath, artPath, archiveFormat)
 	if err != nil {
 		return err
 	}
@@ -491,37 +545,20 @@ func (we *WorkflowExecutor) loadArtifact(ctx context.Context, pluginName wfv1.Ar
 			return err
 		}
 	}
+	if we.provenanceEnabled() && transportDigest.Status == provenance.StatusComplete {
+		we.recordInputArtifact(ctx, &art, driverArt, artDriver, artPath, archiveFormat, transportDigest)
+	}
 	return nil
 }
 
-func (we *WorkflowExecutor) unarchiveArtifact(ctx context.Context, art wfv1.Artifact, tempArtPath, artPath string) error {
-	isTar := false
-	isZip := false
-	var err error
-
-	switch {
-	case art.GetArchive().None != nil:
-		// explicitly not a tar
-		isTar = false
-		isZip = false
-	case art.GetArchive().Tar != nil:
-		// explicitly a tar
-		isTar = true
-	case art.GetArchive().Zip != nil:
-		// explicitly a zip
-		isZip = true
-	default:
-		// auto-detect if tarball
-		// (don't try to autodetect zip files for backwards compatibility)
-		isTar, err = isTarball(ctx, tempArtPath)
-		if err != nil {
-			return err
-		}
-	}
+func (we *WorkflowExecutor) unarchiveArtifact(ctx context.Context, art wfv1.Artifact, tempArtPath, artPath, archiveFormat string) error {
+	isTar := archiveFormat == provenance.FormatTarGzip || archiveFormat == provenance.FormatTar
+	isZip := archiveFormat == provenance.FormatZip
 
 	unarchiveCtx, span := we.Tracing.StartUnarchiveArtifact(ctx, artifactArchiveWord(isZip, isTar))
 	defer span.End()
 
+	var err error
 	switch {
 	case isTar:
 		err = untar(unarchiveCtx, tempArtPath, artPath)
@@ -675,6 +712,13 @@ func (we *WorkflowExecutor) saveArtifactFromFile(ctx context.Context, art *wfv1.
 	if err != nil {
 		return err
 	}
+	// Provenance: record only after Save succeeds. The summary reads
+	// the staged local bytes once; Save is never called again and no
+	// reader is retried. maybeDeleteLocalArtPath runs afterwards so the
+	// digest always has the file available.
+	if we.provenanceEnabled() {
+		we.recordOutputArtifact(ctx, art, driverArt, artDriver, localArtPath)
+	}
 	we.maybeDeleteLocalArtPath(ctx, localArtPath)
 	logging.RequireLoggerFromContext(ctx).WithField("path", localArtPath).Info(ctx, "Successfully saved file")
 	return nil
@@ -743,10 +787,18 @@ func (we *WorkflowExecutor) stageArchiveFile(ctx context.Context, containerName 
 				return "", "", argoerrs.InternalWrapError(err)
 			}
 			zw := zip.NewWriter(f)
-			defer zw.Close()
 			err = archive.ZipToWriter(ctx, mountedArtPath, zw)
 			if err != nil {
+				_ = zw.Close()
+				_ = f.Close()
 				return "", "", err
+			}
+			if err := zw.Close(); err != nil {
+				_ = f.Close()
+				return "", "", argoerrs.InternalWrapError(err)
+			}
+			if err := f.Close(); err != nil {
+				return "", "", argoerrs.InternalWrapError(err)
 			}
 			logger.WithFields(logging.Fields{"path": art.Path, "mountedArtPath": mountedArtPath}).Info(ctx, "Successfully staged from mirrored volume mount")
 			return fileName, localArtPath, nil
@@ -760,7 +812,11 @@ func (we *WorkflowExecutor) stageArchiveFile(ctx context.Context, containerName 
 		w := bufio.NewWriter(f)
 		err = archive.TarGzToWriter(ctx, mountedArtPath, compressionLevel, w)
 		if err != nil {
+			_ = f.Close()
 			return "", "", err
+		}
+		if err := f.Close(); err != nil {
+			return "", "", argoerrs.InternalWrapError(err)
 		}
 		logger.WithFields(logging.Fields{"path": art.Path, "mountedArtPath": mountedArtPath}).Info(ctx, "Successfully staged from mirrored volume mount")
 		return fileName, localArtPath, nil
@@ -1017,7 +1073,7 @@ func (we *WorkflowExecutor) newDriverArt(art *wfv1.Artifact) (*wfv1.Artifact, er
 
 // InitDriver initializes an instance of an artifact driver
 func (we *WorkflowExecutor) InitDriver(ctx context.Context, art *wfv1.Artifact) (artifactcommon.ArtifactDriver, error) {
-	driver, err := artifacts.NewDriver(ctx, art, we)
+	driver, err := we.newDriver(ctx, art, we)
 	if errors.Is(err, artifacts.ErrUnsupportedDriver) {
 		return nil, argoerrs.Errorf(argoerrs.CodeBadRequest, "Unsupported artifact driver for %s", art.Name)
 	}

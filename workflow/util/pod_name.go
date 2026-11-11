@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
@@ -103,4 +104,21 @@ func GetWorkflowPodNameVersion(wf *v1alpha1.Workflow) PodNameVersion {
 	default:
 		return DefaultPodNameVersion
 	}
+}
+
+// NodeAttemptFromName returns the zero-based retry attempt encoded in a
+// node name. Retry attempt nodes are named "<retry-node>(<n>)" (see
+// handleRetries); a node without the suffix is the first attempt and
+// returns 0. A malformed suffix also returns 0 rather than an error so
+// the executor never fails a pod over an observability field.
+func NodeAttemptFromName(nodeName string) int {
+	open := strings.LastIndex(nodeName, "(")
+	if open <= 0 || !strings.HasSuffix(nodeName, ")") {
+		return 0
+	}
+	attempt, err := strconv.Atoi(nodeName[open+1 : len(nodeName)-1])
+	if err != nil || attempt < 0 {
+		return 0
+	}
+	return attempt
 }

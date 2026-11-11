@@ -24,6 +24,7 @@ import (
 	"github.com/argoproj/argo-workflows/v4/workflow/common"
 	"github.com/argoproj/argo-workflows/v4/workflow/executor"
 	"github.com/argoproj/argo-workflows/v4/workflow/executor/emissary"
+	"github.com/argoproj/argo-workflows/v4/workflow/executor/provenance"
 	"github.com/argoproj/argo-workflows/v4/workflow/tracing"
 )
 
@@ -84,6 +85,7 @@ func InitProcess(ctx context.Context, clientConfig clientcmd.ClientConfig) *exec
 			RetryBackoff:                 retry.ExecutorRetry(ctx),
 			ResourceStateCheckInterval:   env.LookupEnvDurationOr(ctx, "RESOURCE_STATE_CHECK_INTERVAL", 5*time.Second),
 			TaskResultRetryTimeout:       retry.ExecutorTaskResultRetryTimeout(ctx),
+			Provenance:                   provenanceConfigFromEnv(ctx),
 		},
 	)
 	CheckErr(err)
@@ -120,16 +122,48 @@ func TaskConfigFromEnv(varRunArgo string) executor.TaskConfig {
 		inputPlugins = append(inputPlugins, wfv1.ArtifactPluginName(p))
 	}
 
+	nodeAttempt, _ := strconv.Atoi(os.Getenv(common.EnvVarNodeAttempt))
+
 	return executor.TaskConfig{
 		WorkflowName:             os.Getenv(common.EnvVarWorkflowName),
 		WorkflowUID:              types.UID(os.Getenv(common.EnvVarWorkflowUID)),
 		NodeID:                   os.Getenv(common.EnvVarNodeID),
+		NodeAttempt:              nodeAttempt,
 		Template:                 *tmpl,
 		IncludeScriptOutput:      os.Getenv(common.EnvVarIncludeScriptOutput) == "true",
 		Deadline:                 deadline,
 		ProgressFile:             os.Getenv(common.EnvVarProgressFile),
 		InputArtifactPluginNames: inputPlugins,
 	}
+}
+
+// provenanceConfigFromEnv parses the optional artifact provenance
+// settings. It returns nil while disabled so the executor keeps its
+// original artifact path with no hashing or extra reads.
+func provenanceConfigFromEnv(ctx context.Context) *provenance.Config {
+	if os.Getenv(common.EnvVarArtifactProvenanceManifest) != "true" {
+		return nil
+	}
+	cfg := &provenance.Config{
+		Enabled:        true,
+		Budget:         provenance.DefaultBudget(),
+		SigningKeyPath: os.Getenv(common.EnvVarArtifactProvenanceSigningKeyFile),
+	}
+	if raw := os.Getenv(common.EnvVarArtifactProvenanceMaxBytes); raw != "" {
+		if maxBytes, err := strconv.ParseInt(raw, 10, 64); err == nil && maxBytes > 0 {
+			cfg.Budget.MaxBytes = maxBytes
+		} else {
+			logging.RequireLoggerFromContext(ctx).WithField("value", raw).Warn(ctx, "ignoring invalid provenance max bytes")
+		}
+	}
+	if raw := os.Getenv(common.EnvVarArtifactProvenanceMaxFiles); raw != "" {
+		if maxFiles, err := strconv.Atoi(raw); err == nil && maxFiles > 0 {
+			cfg.Budget.MaxFiles = maxFiles
+		} else {
+			logging.RequireLoggerFromContext(ctx).WithField("value", raw).Warn(ctx, "ignoring invalid provenance max files")
+		}
+	}
+	return cfg
 }
 
 // Init builds the executor for the one task a classic argoexec pod runs:

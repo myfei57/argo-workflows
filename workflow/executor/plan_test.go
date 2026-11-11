@@ -137,9 +137,10 @@ func TestPlanFor_InitlessLayout(t *testing.T) {
 		"write-template",
 		"stage-files",
 		"parallel(load-artifacts,load-artifacts-from-plugin(s3),load-artifacts-from-plugin(gcs))",
+		"finalize-input-provenance",
 	}, stageNames(plan.Prepare))
 	assert.Equal(t, []string{"initialize-output", "wait"}, stageNames(plan.Run))
-	assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "save-logs", "report-outputs"}, stageNames(plan.Collect))
+	assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "finalize-output-provenance", "save-logs", "report-outputs"}, stageNames(plan.Collect))
 }
 
 func TestPlanFor_InitlessNoPlugins(t *testing.T) {
@@ -152,9 +153,9 @@ func TestPlanFor_InitlessNoPlugins(t *testing.T) {
 func TestPlanFor_LegacyLayout(t *testing.T) {
 	plan := planFor(&wfv1.Template{Container: &apiv1.Container{}}, LayoutLegacy, []wfv1.ArtifactPluginName{"s3"})
 
-	assert.Equal(t, []string{"install-argoexec", "stage-files", "load-artifacts"}, stageNames(plan.Prepare))
+	assert.Equal(t, []string{"install-argoexec", "stage-files", "load-artifacts", "finalize-input-provenance"}, stageNames(plan.Prepare))
 	assert.Equal(t, []string{"initialize-output", "wait"}, stageNames(plan.Run))
-	assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "save-logs", "report-outputs"}, stageNames(plan.Collect))
+	assert.Equal(t, []string{"capture-script-result", "save-parameters", "save-artifacts", "finalize-output-provenance", "save-logs", "report-outputs"}, stageNames(plan.Collect))
 }
 
 func TestPlanFor_ResourceTemplateCollectsLogsOnly(t *testing.T) {

@@ -178,6 +178,21 @@ const (
 	EnvVarWorkflowUID = "ARGO_WORKFLOW_UID"
 	// EnvVarNodeID is the node ID of the node.
 	EnvVarNodeID = "ARGO_NODE_ID"
+	// EnvVarNodeAttempt is the zero-based retry attempt of the node,
+	// derived by the controller from the attempt suffix of the node name.
+	EnvVarNodeAttempt = "ARGO_NODE_ATTEMPT"
+	// EnvVarArtifactProvenanceManifest enables optional artifact
+	// provenance manifests at the executor load/save success boundaries.
+	EnvVarArtifactProvenanceManifest = "ARGO_ARTIFACT_PROVENANCE_MANIFEST"
+	// EnvVarArtifactProvenanceMaxBytes bounds the content bytes hashed
+	// per artifact tree when provenance is enabled.
+	EnvVarArtifactProvenanceMaxBytes = "ARGO_ARTIFACT_PROVENANCE_MAX_BYTES"
+	// EnvVarArtifactProvenanceMaxFiles bounds the number of tree entries
+	// hashed per artifact when provenance is enabled.
+	EnvVarArtifactProvenanceMaxFiles = "ARGO_ARTIFACT_PROVENANCE_MAX_FILES"
+	// EnvVarArtifactProvenanceSigningKeyFile names a file holding an
+	// HMAC-SHA256 key; when empty, manifests are written unsigned.
+	EnvVarArtifactProvenanceSigningKeyFile = "ARGO_ARTIFACT_PROVENANCE_SIGNING_KEY_FILE"
 	// EnvVarPluginAddresses is a list of plugin addresses
 	EnvVarPluginAddresses = "ARGO_PLUGIN_ADDRESSES"
 	// EnvVarPluginNames is a list of plugin names

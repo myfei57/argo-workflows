@@ -51,9 +51,9 @@ func (l Layout) String() string {
 // collected.
 func planFor(tmpl *wfv1.Template, layout Layout, inputPlugins []wfv1.ArtifactPluginName) Plan {
 	plan := Plan{
-		Prepare: []Stage{installArgoexec, stageFiles, loadArtifacts},
+		Prepare: []Stage{installArgoexec, stageFiles, loadArtifacts, finalizeInputProvenance},
 		Run:     []Stage{initializeOutput, waitMain},
-		Collect: []Stage{captureScriptResult, saveParameters, saveArtifacts, saveLogs, reportOutputs},
+		Collect: []Stage{captureScriptResult, saveParameters, saveArtifacts, finalizeOutputProvenance, saveLogs, reportOutputs},
 	}
 	switch layout {
 	case LayoutInitless:
@@ -61,11 +61,13 @@ func planFor(tmpl *wfv1.Template, layout Layout, inputPlugins []wfv1.ArtifactPlu
 		for _, p := range inputPlugins {
 			load = append(load, loadArtifactsFromPlugin(p))
 		}
-		plan.Prepare = []Stage{writeTemplate, stageFiles, Parallel(load...)}
+		// Finalization sits outside the parallel group so the manifest
+		// cannot be frozen while a plugin load stage is still recording.
+		plan.Prepare = []Stage{writeTemplate, stageFiles, Parallel(load...), finalizeInputProvenance}
 	case LayoutWorker:
 		// One process runs everything: the template is in memory, so there
 		// is nothing to install or write for another container.
-		plan.Prepare = []Stage{checkWorker, createTaskDirs, stageFiles, loadArtifacts}
+		plan.Prepare = []Stage{checkWorker, createTaskDirs, stageFiles, loadArtifacts, finalizeInputProvenance}
 		plan.Run = []Stage{initializeOutput, runMain}
 	}
 	if tmpl.Resource != nil {
